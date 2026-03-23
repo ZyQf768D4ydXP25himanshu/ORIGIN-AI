@@ -1,0 +1,9 @@
+{
+  "name": "ORIGIN-AI OS",
+  "description": "An advanced AI-powered operating system environment with full-stack integration, founded by Himanshu Shukla.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
