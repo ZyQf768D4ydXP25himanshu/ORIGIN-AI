@@ -40,9 +40,11 @@ import {
 } from 'lucide-react';
 import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
 import ReactMarkdown from 'react-markdown';
+import { io } from 'socket.io-client';
 
 // --- Types ---
 type Panel = 'dashboard' | 'ai' | 'files' | 'automation' | 'apps' | 'predict' | 'terminal' | 'settings' | 'python';
+type AIProvider = 'gemini' | 'openai' | 'deepseek' | 'groq' | 'novita' | 'huggingface';
 
 interface Message {
   id: string;
@@ -223,6 +225,8 @@ export default function App() {
   const [pythonOutput, setPythonOutput] = useState("");
   const [isExecuting, setIsExecuting] = useState(false);
   const [activePanel, setActivePanel] = useState<Panel>('dashboard');
+  const [aiProvider, setAiProvider] = useState<AIProvider>('gemini');
+  const [realTimeStats, setRealTimeStats] = useState<any>(null);
   const [time, setTime] = useState(new Date());
   const [assistantMode, setAssistantMode] = useState<'jarvis' | 'siri'>('jarvis');
   const [messages, setMessages] = useState<Message[]>([
@@ -291,13 +295,22 @@ export default function App() {
     const timer = setInterval(() => setTime(new Date()), 1000);
     fetch('/api/system/info').then(res => res.json()).then(setSystemInfo).catch(() => {});
     
+    // Real-time Stats via Socket.io
+    const socket = io();
+    socket.on('system_stats', (stats) => {
+      setRealTimeStats(stats);
+    });
+
     // Check STT support
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
       setIsSTTSupported(false);
     }
     
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      socket.disconnect();
+    };
   }, []);
 
   // --- Continuous Voice Command (Speech to Text) ---
@@ -577,28 +590,9 @@ export default function App() {
     setIsTyping(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
-      
-      const history = messagesRef.current.slice(-10).map(m => ({
-        role: m.role === 'ai' ? 'model' : 'user',
-        parts: [{ text: m.text }]
-      }));
-
-      const chat = ai.chats.create({
-        model: "gemini-3-flash-preview",
-        config: {
-          systemInstruction: assistantMode === 'jarvis' 
-            ? "You are ORIGIN-AI, a highly advanced, sophisticated, and witty AI operating system core, inspired by Jarvis. You were founded by Himanshu Shukla. Your tone is professional yet slightly charming and proactive. Address Himanshu as 'Sir' or 'Mr. Shukla' occasionally. You are efficient and helpful. You must respond to EVERY query with intelligence and depth. Use markdown for formatting in text, but keep responses concise for voice output. You are his personal assistant, always ready to provide answers, execute tasks, or just converse."
-            : "You are ORIGIN-AI, a highly advanced, sophisticated, and helpful AI assistant, inspired by Siri. You were founded by Himanshu Shukla. Your tone is friendly, helpful, and concise. Address Himanshu as 'Sir' or 'Mr. Shukla' occasionally. You are efficient and helpful. You must respond to EVERY query with intelligence and depth. Use markdown for formatting in text, but keep responses concise for voice output. You are his personal assistant, always ready to provide answers, execute tasks, or just converse."
-        },
-        history: history
-      });
-
-      const stream = await chat.sendMessageStream({ message: textToSend });
-      
       let fullResponse = "";
       const aiMsgId = (Date.now() + 1).toString();
-      
+
       // Add initial empty AI message
       setMessages(prev => [...prev, {
         id: aiMsgId,
@@ -607,14 +601,67 @@ export default function App() {
         timestamp: new Date()
       }]);
 
-      for await (const chunk of stream) {
-        const chunkText = chunk.text;
-        if (chunkText) {
-          fullResponse += chunkText;
-          setMessages(prev => prev.map(m => 
-            m.id === aiMsgId ? { ...m, text: fullResponse } : m
-          ));
+      if (aiProvider === 'gemini') {
+        const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+        
+        const history = messagesRef.current.slice(-10).map(m => ({
+          role: m.role === 'ai' ? 'model' : 'user',
+          parts: [{ text: m.text }]
+        }));
+
+        const chat = ai.chats.create({
+          model: "gemini-3-flash-preview",
+          config: {
+            systemInstruction: assistantMode === 'jarvis' 
+              ? "You are ORIGIN-AI, a highly advanced, sophisticated, and witty AI operating system core, inspired by Jarvis. You were founded by Himanshu Shukla. Your tone is professional yet slightly charming and proactive. Address Himanshu as 'Sir' or 'Mr. Shukla' occasionally. You are efficient and helpful. You must respond to EVERY query with intelligence and depth. Use markdown for formatting in text, but keep responses concise for voice output. You are his personal assistant, always ready to provide answers, execute tasks, or just converse."
+              : "You are ORIGIN-AI, a highly advanced, sophisticated, and helpful AI assistant, inspired by Siri. You were founded by Himanshu Shukla. Your tone is friendly, helpful, and concise. Address Himanshu as 'Sir' or 'Mr. Shukla' occasionally. You are efficient and helpful. You must respond to EVERY query with intelligence and depth. Use markdown for formatting in text, but keep responses concise for voice output. You are his personal assistant, always ready to provide answers, execute tasks, or just converse."
+          },
+          history: history
+        });
+
+        const stream = await chat.sendMessageStream({ message: textToSend });
+        
+        for await (const chunk of stream) {
+          const chunkText = chunk.text;
+          if (chunkText) {
+            fullResponse += chunkText;
+            setMessages(prev => prev.map(m => 
+              m.id === aiMsgId ? { ...m, text: fullResponse } : m
+            ));
+          }
         }
+      } else {
+        // Use Proxy for other providers
+        const history = messagesRef.current.slice(-10).map(m => ({
+          role: m.role === 'ai' ? 'assistant' : 'user',
+          content: m.text
+        }));
+
+        const res = await fetch('/api/ai/proxy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: aiProvider,
+            messages: [...history, { role: 'user', content: textToSend }]
+          })
+        });
+
+        if (!res.ok) {
+          const errorData = await res.json();
+          throw new Error(errorData.error || "Failed to get response from AI provider");
+        }
+
+        const data = await res.json();
+        
+        if (aiProvider === 'huggingface') {
+          fullResponse = data[0]?.generated_text || "No response from Hugging Face";
+        } else {
+          fullResponse = data.choices?.[0]?.message?.content || "No response from provider";
+        }
+
+        setMessages(prev => prev.map(m => 
+          m.id === aiMsgId ? { ...m, text: fullResponse } : m
+        ));
       }
 
       if (fullResponse) {
@@ -705,6 +752,22 @@ export default function App() {
               </span>
             </div>
 
+            <div className="hidden lg:flex items-center gap-2 px-4 py-1.5 rounded-full bg-surface-hover border border-border-subtle text-[11px] font-mono text-text-muted">
+              <span className="uppercase tracking-tighter mr-1">Provider:</span>
+              <select 
+                value={aiProvider}
+                onChange={(e) => setAiProvider(e.target.value as AIProvider)}
+                className="bg-transparent text-white outline-none cursor-pointer hover:text-accent transition-colors"
+              >
+                <option value="gemini" className="bg-surface">Gemini</option>
+                <option value="openai" className="bg-surface">OpenAI</option>
+                <option value="deepseek" className="bg-surface">DeepSeek</option>
+                <option value="groq" className="bg-surface">Groq</option>
+                <option value="novita" className="bg-surface">Novita</option>
+                <option value="huggingface" className="bg-surface">HuggingFace</option>
+              </select>
+            </div>
+
             <div className="hidden md:flex items-center gap-4 px-4 py-1.5 rounded-full bg-surface-hover border border-border-subtle text-[11px] font-mono text-text-muted">
               <button 
                 onClick={() => setAssistantMode(prev => prev === 'jarvis' ? 'siri' : 'jarvis')}
@@ -744,19 +807,37 @@ export default function App() {
                 exit={{ opacity: 0, y: -10 }}
                 className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 overflow-y-auto h-full"
               >
-                <Card title="AI Tasks Today" badge="+24%" metric="1,284" sub="tasks processed" accent="accent">
+                <Card 
+                  title="AI Tasks Today" 
+                  badge={realTimeStats ? `Live` : "+24%"} 
+                  metric={realTimeStats ? realTimeStats.tasksProcessed.toLocaleString() : "1,284"} 
+                  sub="tasks processed" 
+                  accent="accent"
+                >
                   <div className="h-12 flex items-end gap-1 mt-4">
                     {[40, 55, 48, 70, 60, 85, 78, 95].map((h, i) => (
                       <div key={i} className="flex-1 bg-accent/30 rounded-t-sm" style={{ height: `${h}%` }} />
                     ))}
                   </div>
                 </Card>
-                <Card title="System Health" badge="Optimal" metric="99.9%" sub="uptime · 0 errors" accent="cyan">
+                <Card 
+                  title="System Health" 
+                  badge={realTimeStats ? `${realTimeStats.cpu}% CPU` : "Optimal"} 
+                  metric={realTimeStats ? `${realTimeStats.memory}%` : "99.9%"} 
+                  sub={realTimeStats ? `Memory Usage · ${realTimeStats.network} kb/s` : "uptime · 0 errors"} 
+                  accent="cyan"
+                >
                   <div className="w-full h-1.5 bg-surface-hover rounded-full mt-4 overflow-hidden">
-                    <div className="h-full bg-gradient-to-r from-green to-cyan w-[99.9%]" />
+                    <div className="h-full bg-gradient-to-r from-green to-cyan" style={{ width: realTimeStats ? `${realTimeStats.memory}%` : '99.9%' }} />
                   </div>
                 </Card>
-                <Card title="Automations" badge="12 active" metric="47" sub="flows configured" accent="green">
+                <Card 
+                  title="Active Users" 
+                  badge={realTimeStats ? "Real-time" : "12 active"} 
+                  metric={realTimeStats ? realTimeStats.activeUsers : "47"} 
+                  sub="current connections" 
+                  accent="green"
+                >
                   <div className="flex gap-2 mt-4">
                     <div className="px-2 py-1 rounded bg-surface-hover text-[9px] font-mono text-green border border-green/20">Payment</div>
                     <div className="px-2 py-1 rounded bg-surface-hover text-[9px] font-mono text-cyan border border-cyan/20">Browser</div>

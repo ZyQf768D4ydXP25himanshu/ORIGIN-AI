@@ -8,6 +8,8 @@ import morgan from "morgan";
 import dotenv from "dotenv";
 import multer from "multer";
 import FormData from "form-data";
+import { createServer } from "http";
+import { Server } from "socket.io";
 
 dotenv.config();
 
@@ -15,7 +17,34 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 async function startServer() {
   const app = express();
+  const httpServer = createServer(app);
+  const io = new Server(httpServer, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    }
+  });
   const PORT = 3000;
+
+  // Real-time System Data Simulation
+  setInterval(() => {
+    const systemStats = {
+      cpu: Math.floor(Math.random() * 100),
+      memory: Math.floor(Math.random() * 100),
+      network: Math.floor(Math.random() * 1000),
+      timestamp: new Date().toISOString(),
+      activeUsers: Math.floor(Math.random() * 50) + 1,
+      tasksProcessed: Math.floor(Math.random() * 10000)
+    };
+    io.emit("system_stats", systemStats);
+  }, 2000);
+
+  io.on("connection", (socket) => {
+    console.log("Client connected to real-time stream:", socket.id);
+    socket.on("disconnect", () => {
+      console.log("Client disconnected:", socket.id);
+    });
+  });
 
   // MongoDB Connection
   const MONGODB_URI = process.env.MONGODB_URI;
@@ -35,6 +64,76 @@ async function startServer() {
   app.use(cors());
   app.use(morgan("dev"));
   app.use(express.json());
+
+  // AI Proxy Routes
+  app.post("/api/ai/proxy", async (req: any, res: any) => {
+    const { provider, messages, model } = req.body;
+    
+    let apiUrl = "";
+    let apiKey = "";
+    let body: any = {};
+    let headers: any = {
+      "Content-Type": "application/json"
+    };
+
+    switch (provider) {
+      case "openai":
+        apiUrl = "https://api.openai.com/v1/chat/completions";
+        apiKey = process.env.OPENAI_API_KEY || "";
+        body = { model: model || "gpt-4o", messages };
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        break;
+      case "deepseek":
+        apiUrl = "https://api.deepseek.com/v1/chat/completions";
+        apiKey = process.env.DEEPSEEK_API_KEY || "";
+        body = { model: model || "deepseek-chat", messages };
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        break;
+      case "groq":
+        apiUrl = "https://api.groq.com/openai/v1/chat/completions";
+        apiKey = process.env.GROQ_API_KEY || "";
+        body = { model: model || "llama3-8b-8192", messages };
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        break;
+      case "novita":
+        apiUrl = "https://api.novita.ai/v3/openai/chat/completions";
+        apiKey = process.env.NOVITA_AI_API_KEY || "";
+        body = { model: model || "meta-llama/llama-3-70b-instruct", messages };
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        break;
+      case "huggingface":
+        apiUrl = `https://api-inference.huggingface.co/models/${model || "meta-llama/Llama-3.2-3B-Instruct"}`;
+        apiKey = process.env.HUGGINGFACE_API_KEY || "";
+        body = { inputs: messages[messages.length - 1].content };
+        headers["Authorization"] = `Bearer ${apiKey}`;
+        break;
+      default:
+        return res.status(400).json({ error: "Invalid provider" });
+    }
+
+    if (!apiKey) {
+      return res.status(401).json({ error: `${provider} API key not configured` });
+    }
+
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        return res.status(response.status).json(errorData);
+      }
+
+      const data = await response.json();
+      res.json(data);
+    } catch (error) {
+      console.error(`${provider} Proxy Error:`, error);
+      res.status(500).json({ error: `Failed to process ${provider} request` });
+    }
+  });
 
   // API Routes
   app.get("/api/health", (req, res) => {
@@ -178,7 +277,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
     console.log("Copyright © Himanshu Shukla, Founder and CEO");
   });
